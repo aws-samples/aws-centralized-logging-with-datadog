@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This is a sample, non-production-ready template for building AWS environemnt 
+  (c) 2018 Amazon Web Services, Inc. or its affiliates. All Rights Reserved. 
+  This AWS Content is provided subject to the terms of the AWS Customer Agreement available at http://aws.amazon.com/agreement
+  or other written agreement between Customer and Amazon Web Services, Inc."
+Parameters:
+  SharedSecurityAccount:
+    Type: String
+    Default: 111111111111
+    Description: AWS Shared Security Account ID
+Resources:
+ OrgPolicy:
+   Type: "AWS::IAM::ManagedPolicy"
+   Properties: 
+     ManagedPolicyName: "ST-S-Automation"
+     PolicyDocument: 
+       Version: "2012-10-17"
+       Statement: 
+         - 
+           Effect: "Allow"
+           Action:
+            - "organizations:DescribeOrganization"
+            - "organizations:DescribeOrganizationalUnit"
+            - "organizations:CreateAccount"
+            - "organizations:DescribeCreateAccountStatus"
+            - "organizations:ListRoots"
+            - "organizations:MoveAccount"
+            - "organizations:AttachPolicy"
+            - "sts:AssumeRole"
+           Resource: "*"
+ OrgRole: 
+   Type: "AWS::IAM::Role"
+   Properties: 
+     AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal:
+              AWS:
+               - !Join
+                 - ""
+                 - - "arn:aws:iam::"
+                   - !Ref SharedSecurityAccount
+                   - ":root"
+            Action: 
+              - "sts:AssumeRole"
+     ManagedPolicyArns: [!Ref OrgPolicy]
+     RoleName: ST-S-Automation

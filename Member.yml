@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This is a sample, non-production-ready template for building AWS environemnt 
+  (c) 2018 Amazon Web Services, Inc. or its affiliates. All Rights Reserved. 
+  This AWS Content is provided subject to the terms of the AWS Customer Agreement available at http://aws.amazon.com/agreement
+  or other written agreement between Customer and Amazon Web Services, Inc."
+Parameters:
+  cloudtrailbucket:
+    Type: String
+    Default: test-cloudtrail001
+    Description: S3 Bucket for CloudTrail logs
+  Datadogbucket:
+    Type: String
+    Description: S3 Bucket for Datadog Lambda code
+  securityaccountid:
+    Type: String
+    Default: 111122223333
+    Description: AWS Account id for Shared Security Account
+  DatadogAPIToken:
+    Type: String
+    Description: Datadog API Token
+    NoEcho: true
+Resources:
+ OrgTrail: 
+   Type: "AWS::CloudTrail::Trail"
+   Properties:
+     TrailName: Test-CloudTrail001
+     S3BucketName: !Ref cloudtrailbucket
+     IncludeGlobalServiceEvents: true
+     IsLogging: true
+     IsMultiRegionTrail: true
+     EnableLogFileValidation: true
+ TestBucket:
+   Type: 'AWS::S3::Bucket'
+   Properties:
+     BucketName: !Ref AWS::AccountId
+ KMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: 'KMS Key to encrypt Lambda environment variables'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          -
+            Sid: 'Allow administration of the key'
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          -
+            Sid: 'Allow Lambda role to decrypt using the key'
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaRole.Arn
+            Action: 'kms:*'
+            Resource: '*'
+  # The IAM Role our Custom Resource will use to encrypt our
+  # API Token with our newly created KMS key in the new account
+ CustomResourceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        -
+          PolicyName: CustomResourceIAMPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'kms:encrypt'
+                  - 'lambda:UpdateFunctionConfiguration'
+                Resource: '*'
+  # The Lambda function that will be invoked as a custom resource
+  # when our stack launches
+ CustomResourceFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python2.7
+      Timeout: 240
+      FunctionName: KMSCustomResource
+      Code: 
+        ZipFile: |
+          import os
+          import boto3
+          import cfnresponse
+          import base64
+          import json
+          kms_client = boto3.client('kms')
+          lambda_client = boto3.client('lambda')
+          def lambda_handler(event, context):
+            try:
+              print(json.dumps(event, indent=2, sort_keys=True))
+              if event['RequestType'] in ['Create', 'Update']:
+                response = kms_client.encrypt(
+                    KeyId=os.environ['KMS_KEY'],
+                    Plaintext=os.environ['API_TOKEN']
+                )
+                cipher_text = base64.b64encode(response['CiphertextBlob'])
+                print cipher_text
+                # Now we need to remove the API Token as an env var from
+                # this function since it isn't encrypted
+                lambda_client.update_function_configuration(
+                  FunctionName="KMSCustomResource",
+                  Environment={
+                      'Variables': {}
+                  }
+                )
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                  'CipherText': cipher_text
+                })
+              else:
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as error:
+              print(error)
+              cfnresponse.send(event, context, cfnresponse.FAILURE, {})
+      Environment:
+        Variables:
+          KMS_KEY: !GetAtt KMSKey.Arn
+          API_TOKEN: !Ref DatadogAPIToken
+      Role: !GetAtt CustomResourceRole.Arn
+ KMSEncryptCustomResource:
+    Type: 'Custom::KMSEncryptCustomResource'
+    Properties:
+      ServiceToken: !GetAtt CustomResourceFunction.Arn
+      Region: !Ref 'AWS::Region'
+ AutomationRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              AWS: 
+                - !Ref securityaccountid
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns: ['arn:aws:iam::aws:policy/AdministratorAccess']
+      RoleName: ST-S-Automation
+ LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:*SamlProvider
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+ MonitoringPolicy:
+   Type: "AWS::IAM::ManagedPolicy"
+   Properties: 
+     ManagedPolicyName: "ST-S-Monitoring"
+     PolicyDocument: 
+       Version: "2012-10-17"
+       Statement: 
+         - 
+           Effect: "Allow"
+           Action:
+            - "autoscaling:Describe*"
+            - "budgets:ViewBudget"
+            - "cloudfront:GetDistributionConfig"
+            - "cloudfront:ListDistributions"
+            - "cloudtrail:DescribeTrails"
+            - "cloudtrail:GetTrailStatus"
+            - "cloudwatch:Describe*"
+            - "cloudwatch:Get*"
+            - "cloudwatch:List*"
+            - "codedeploy:List*"
+            - "codedeploy:BatchGet*"
+            - "directconnect:Describe*"
+            - "dynamodb:List*"
+            - "dynamodb:Describe*"
+            - "ec2:Describe*"
+            - "ecs:Describe*"
+            - "ecs:List*"
+            - "elasticache:Describe*"
+            - "elasticache:List*"
+            - "elasticfilesystem:DescribeFileSystems"
+            - "elasticfilesystem:DescribeTags"
+            - "elasticloadbalancing:Describe*"
+            - "elasticmapreduce:List*"
+            - "elasticmapreduce:Describe*"
+            - "es:ListTags"
+            - "es:ListDomainNames"
+            - "es:DescribeElasticsearchDomains"
+            - "health:DescribeEvents"
+            - "health:DescribeEventDetails"
+            - "health:DescribeAffectedEntities"
+            - "kinesis:List*"
+            - "kinesis:Describe*"
+            - "lambda:AddPermission"
+            - "lambda:GetPolicy"
+            - "lambda:List*"
+            - "lambda:RemovePermission"
+            - "logs:Get*"
+            - "logs:Describe*"
+            - "logs:FilterLogEvents"
+            - "logs:TestMetricFilter"
+            - "rds:Describe*"
+            - "rds:List*"
+            - "redshift:DescribeClusters"
+            - "redshift:DescribeLoggingStatus"
+            - "route53:List*"
+            - "s3:GetBucketLogging"
+            - "s3:GetBucketLocation"
+            - "s3:GetBucketNotification"
+            - "s3:GetBucketTagging"
+            - "s3:ListAllMyBuckets"
+            - "s3:PutBucketNotification"
+            - "ses:Get*"
+            - "sns:List*"
+            - "sns:Publish"
+            - "sqs:ListQueues"
+            - "support:*"
+            - "tag:getResources"
+            - "tag:getTagKeys"
+            - "tag:getTagValues"
+           Resource: "*"
+ MonitoringRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              AWS: 
+                - '464622532012'
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns: [!Ref MonitoringPolicy]
+      RoleName: ST-S-Monitoring
+ LambdaPolicy:
+   Type: "AWS::IAM::ManagedPolicy"
+   Properties: 
+     ManagedPolicyName: "ST-S-Lambda"
+     PolicyDocument: 
+       Version: "2012-10-17"
+       Statement: 
+         - 
+           Effect: "Allow"
+           Action:
+            - "s3:GetObject"
+            - "kms:decrypt"
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+           Resource: 
+            - "*"
+ LambdaRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "lambda.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns: [!Ref LambdaPolicy]
+      RoleName: LambdaServiceRole
+ DataDogLambda:
+  Type: "AWS::Lambda::Function"
+  DependsOn: 
+   - LambdaPolicy
+  Properties: 
+    Handler: "lambda_function.lambda_handler"
+    FunctionName: DataDogLambda
+    MemorySize: 1024
+    Role: !GetAtt LambdaRole.Arn
+    Code:
+      S3Bucket: !Ref Datadogbucket
+      S3Key: "lambda_function.zip"
+    Runtime: "python2.7"
+    Environment:
+      Variables:
+        DD_KMS_API_KEY: !GetAtt KMSEncryptCustomResource.CipherText
+    Timeout: "120"
+ DataDogLambdaPermission:
+   Type: 'AWS::Lambda::Permission'
+   Properties: 
+     FunctionName: !GetAtt DataDogLambda.Arn
+     Action: 'lambda:InvokeFunction'
+     Principal: s3.amazonaws.com
+     SourceAccount: !Ref 'AWS::AccountId' 

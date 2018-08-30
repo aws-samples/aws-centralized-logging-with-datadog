@@ -1,4 +1,4 @@
-## AWS Centeralized Logging With Datadog
+## AWS Centralized Logging With Datadog
 
 Automate AWS centralized logging and integrate with Datadog.
 
